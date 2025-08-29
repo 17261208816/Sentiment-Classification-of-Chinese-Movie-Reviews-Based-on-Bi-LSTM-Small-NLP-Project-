@@ -1,0 +1,231 @@
+#-----1-----数据kaggle下载
+import kagglehub
+# Download latest version
+path = kagglehub.dataset_download("tomgzg/douban-balanced-data")
+print("Path to dataset files:", path)
+
+
+
+#-------2-------数据处理与检查
+from transformers import BertTokenizer, BertForSequenceClassification
+from torch.optim import AdamW
+from torch.utils.data import Dataset, DataLoader
+import torch
+from tqdm import tqdm
+from sklearn.metrics import confusion_matrix, f1_score, accuracy_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+import jieba
+import re
+
+path = '/root/.cache/kagglehub/datasets/tomgzg/douban-balanced-data/versions/1/douban_balanced.csv'
+data = pd.read_csv(path)
+print(data.info())
+print(data.head(20))
+print(data['Star'].unique())
+
+
+
+#------3---------处理中文，并划分数据集
+# 处理中文文本
+def preprocess_text(text):
+    # 去除特殊字符
+    text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', ' ', text)
+    # 使用jieba分词
+    words = jieba.cut(text)
+    # 过滤长度小于2的词
+    words = [word for word in words if len(word) > 1]
+    return ' '.join(words)
+
+# 应用文本预处理
+data['clean_comment'] = data['Comment'].apply(preprocess_text)
+
+# 划分训练集、验证集和测试集
+train_val_data, test_data = train_test_split(data, test_size=0.2, random_state=42, stratify=data['label'])
+train_data, val_data = train_test_split(train_val_data, test_size=0.25, random_state=42, stratify=train_val_data['label'])
+
+print(f"训练集大小: {len(train_data)}")
+print(f"验证集大小: {len(val_data)}")
+print(f"测试集大小: {len(test_data)}")
+
+
+
+#------4---------数据定义、词汇表构建、数据类构建、BiLSTM模型构建训练
+import jieba
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from collections import Counter
+import numpy as np
+from tqdm import tqdm
+from sklearn.metrics import confusion_matrix, f1_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 1. 数据集定义与分词
+def preprocess(text):
+    # jieba分词+去除空格
+    return ' '.join(jieba.cut(str(text))).strip()
+
+train_data['clean_comment'] = train_data['clean_comment'].apply(preprocess)
+val_data['clean_comment'] = val_data['clean_comment'].apply(preprocess)
+test_data['clean_comment'] = test_data['clean_comment'].apply(preprocess)
+
+# 2. 构建词汇表
+class Vocab:
+    def __init__(self, texts, max_size=10000, min_freq=2):
+        counter = Counter()
+        for text in texts:
+            counter.update(text.split())
+        vocab_items = [item for item in counter.most_common(max_size) if item[1] >= min_freq]
+        self.word2idx = {'<pad>': 0, '<unk>': 1}
+        for word, _ in vocab_items:
+            self.word2idx[word] = len(self.word2idx)
+        self.idx2word = {idx: word for word, idx in self.word2idx.items()}
+        self.vocab_size = len(self.word2idx)
+    def encode(self, text):
+        return [self.word2idx.get(word, self.word2idx['<unk>']) for word in text.split()]
+    def decode(self, indices):
+        return [self.idx2word.get(idx, '<unk>') for idx in indices]
+
+vocab = Vocab(train_data['clean_comment'])
+print(f"词汇表大小: {vocab.vocab_size}")
+
+# 3. 数据集类
+class TextDataset(Dataset):
+    def __init__(self, data, vocab, max_len=64):
+        self.texts = data['clean_comment'].tolist()
+        self.labels = data['label'].tolist()
+        self.vocab = vocab
+        self.max_len = max_len
+    def __len__(self):
+        return len(self.texts)
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+        encoded = self.vocab.encode(text)
+        if len(encoded) < self.max_len:
+            encoded += [self.vocab.word2idx['<pad>']] * (self.max_len - len(encoded))
+        else:
+            encoded = encoded[:self.max_len]
+        return torch.tensor(encoded), torch.tensor(label, dtype=torch.float)
+
+batch_size = 32
+max_len = 64
+train_dataset = TextDataset(train_data, vocab, max_len=max_len)
+val_dataset = TextDataset(val_data, vocab, max_len=max_len)
+test_dataset = TextDataset(test_data, vocab, max_len=max_len)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size)
+test_loader = DataLoader(test_dataset, batch_size=batch_size)
+
+# 4. BiLSTM模型
+class BiLSTMClassifier(nn.Module):
+    def __init__(self, vocab_size, embed_dim=100, hidden_dim=128, num_layers=2, dropout=0.5):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, num_layers=num_layers, 
+                            bidirectional=True, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_dim * 2, 1)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        x = self.dropout(self.embedding(x))
+        lstm_out, _ = self.lstm(x)
+        out = self.dropout(lstm_out[:, -1, :])
+        out = self.fc(out)
+        return out.squeeze()
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = BiLSTMClassifier(vocab.vocab_size).to(device)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+# 5. 训练与验证
+def train_epoch(model, loader, criterion, optimizer, device):
+    model.train()
+    total_loss, total_correct, total_samples = 0, 0, 0
+    for inputs, labels in tqdm(loader, desc='Training'):
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        preds = (torch.sigmoid(outputs) >= 0.5).float()
+        total_correct += (preds == labels).sum().item()
+        total_samples += labels.size(0)
+        total_loss += loss.item()
+    return total_loss / len(loader), total_correct / total_samples
+
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss, total_correct, total_samples = 0, 0, 0
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for inputs, labels in tqdm(loader, desc='Evaluating'):
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            preds = (torch.sigmoid(outputs) >= 0.5).float()
+            total_correct += (preds == labels).sum().item()
+            total_samples += labels.size(0)
+            total_loss += loss.item()
+            all_preds.extend(preds.cpu().numpy().tolist())
+            all_labels.extend(labels.cpu().numpy().tolist())
+    f1 = f1_score(all_labels, all_preds)
+    return total_loss / len(loader), total_correct / total_samples, f1, all_labels, all_preds
+
+# 6. 训练主循环
+num_epochs = 20
+train_losses, val_losses, train_accs, val_accs, val_f1s = [], [], [], [], []
+for epoch in range(num_epochs):
+    print(f'Epoch {epoch+1}/{num_epochs}')
+    train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+    val_loss, val_acc, val_f1, _, _ = evaluate(model, val_loader, criterion, device)
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    train_accs.append(train_acc)
+    val_accs.append(val_acc)
+    val_f1s.append(val_f1)
+    print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}')
+    print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}')
+    print('-' * 50)
+
+# 7. 测试集评估与混淆矩阵
+test_loss, test_acc, test_f1, all_labels, all_preds = evaluate(model, test_loader, criterion, device)
+print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Test F1: {test_f1:.4f}')
+
+cm = confusion_matrix(all_labels, all_preds)
+plt.figure(figsize=(6,5))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix')
+plt.show()
+
+# 8. 绘制loss/acc曲线
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_losses, label='Val Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.title('Loss Curve')
+
+plt.subplot(1,2,2)
+plt.plot(train_accs, label='Train Acc')
+plt.plot(val_accs, label='Val Acc')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.title('Accuracy Curve')
+plt.tight_layout()
+plt.show()
+
