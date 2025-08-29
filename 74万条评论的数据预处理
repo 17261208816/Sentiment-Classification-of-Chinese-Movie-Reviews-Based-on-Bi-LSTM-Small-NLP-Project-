@@ -1,0 +1,79 @@
+import pandas as pd
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+import jieba
+import re
+path = '/kaggle/input/doubanmovieshortcomments/DMSC.csv'
+data = pd.read_csv(path)
+# 删除无关列
+columns_to_drop = ['ID', 'Movie_Name_EN', 'Crawl_Date', 'Number', 'Username', 'Date', 'Like']
+data = data.drop(columns=columns_to_drop)
+# 查看处理后的数据结构
+print(data.info())
+print(data.head(10))
+
+# 筛选 Star 为 1、5 的评论
+filtered_data1 = data[data['Star'].isin([1，2])]
+filtered_data5 = data[data['Star'].isin([5])]
+print('负向（1星和2星）数目：%d' % (filtered_data1.shape[0]))
+print('正向（5星）数目：%d' % (filtered_data5.shape[0]))
+# 筛选出正向(5星)和负向(1星/2星)的评论
+filtered_data = data[data['Star'].isin([1， 2, 5])].copy()
+
+
+# 检查缺失值
+missing_values = filtered_data.isnull().sum()
+
+if missing_values.sum() > 0:
+    # 存在缺失值，进行处理
+    print("\n缺失值统计：")
+    print(missing_values[missing_values > 0])
+    
+    # 删除缺失值所在行（假设评论缺失无法用于分析）
+    filtered_data = filtered_data.dropna(subset=['Comment'])
+    
+    # 或者对缺失值进行填充
+    # data['Comment'] = data['Comment'].fillna('')
+    
+    print(f"处理后数据形状：{filtered_data.shape}")
+else:
+    print("\n数据无缺失值")
+
+# 查看评分分布
+print("\n评分分布：")
+print(filtered_data['Star'].value_counts())
+
+# 检查是否存在无效评分（非1-5之间的值）
+invalid_ratings = filtered_data[(filtered_data['Star'] < 1) | (filtered_data['Star'] > 5)]
+if not invalid_ratings.empty:
+    print(f"\n发现 {len(invalid_ratings)} 条无效评分记录")
+    # 删除无效评分记录
+    filtered_data = filtered_data[(filtered_data['Star'] >= 1) & (filtered_data['Star'] <= 5)]
+    print(f"删除无效评分后数据形状：{filtered_data.shape}")
+
+
+# 构建标签：5星为1(正向)，1/2星为0(负向)
+filtered_data['label'] = filtered_data['Star'].apply(lambda x: 1 if x == 5 else 0)
+
+# 查看正负样本分布
+pos_samples = filtered_data[filtered_data['label'] == 1]
+neg_samples = filtered_data[filtered_data['label'] == 0]
+print(f"正向样本数目: {len(pos_samples)}")
+print(f"负向样本数目: {len(neg_samples)}")
+# 欠采样（正向样本随机抽样至负向样本数量）
+pos_sample = filtered_data[filtered_data['label'] == 1].sample(n=len(neg_samples), random_state=42)
+neg_sample = filtered_data[filtered_data['label'] == 0]
+balanced_data = pd.concat([pos_sample, neg_sample])
+print(f"数据平衡后的正向样本数目: {len(pos_sample)}")
+print(f"数据平衡后的负向样本数目: {len(neg_sample)}")
+# 保存平衡后的数据集
+balanced_data.to_csv('/kaggle/working/douban_balanced.csv', index=False)
+
+# 查看保存的文件
+import os
+print(f"文件大小: {os.path.getsize('/kaggle/working/douban_balanced.csv') / 1024 / 1024:.2f} MB")
+print("文件路径:", '/kaggle/working/douban_balanced.csv')
+
+
